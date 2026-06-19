@@ -49,6 +49,9 @@ services:
       S3_PROXY: 'true'
     ports:
       - '${APP_PORT:-3000}:3000'
+    networks:
+    - default
+    - easypanel
     depends_on:
       postgres:
         condition: service_healthy
@@ -149,5 +152,8 @@ services:
 
 volumes:
   postgres_data:
+networks:
+    easypanel:
+      external: true
   minio_data:
   dragonfly_data:
