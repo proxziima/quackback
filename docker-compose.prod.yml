@@ -1,29 +1,5 @@
 # ============================================================================
-# Quackback — production stack (self-hosting)
-# ============================================================================
-# A self-contained, single-host deployment: the Quackback app plus its
-# datastores (PostgreSQL + Dragonfly + MinIO). Unlike the dev docker-compose.yml,
-# this file is safe to run on a server:
-#   - the app is the ONLY service with a published host port
-#   - datastores are reachable only on the internal compose network
-#   - every secret is required via ${VAR:?...} — the stack refuses to start
-#     half-configured instead of falling back to insecure defaults
-#   - the upload bucket is PRIVATE (served through the app at /api/storage)
-#
-# Quick start:
-#   git clone https://github.com/QuackbackIO/quackback.git && cd quackback
-#   cp .env.prod.example .env      # then fill in every value
-#   docker compose -f docker-compose.prod.yml up -d
-#
-# Migrations run automatically on app startup. Upgrade with:
-#   git pull && docker compose -f docker-compose.prod.yml pull && \
-#     docker compose -f docker-compose.prod.yml up -d
-# (back up your database first — see the self-hosting docs).
-#
-# For an external Postgres / Redis / S3 instead of the bundled datastores,
-# point the URLs at your managed services and remove the services you no longer
-# need. To scale beyond one host, use managed datastores + the `docker run`
-# path; this compose is single-node by design.
+# Quackback — production stack (self-hosting, Easypanel-compatible)
 # ============================================================================
 
 services:
@@ -32,10 +8,7 @@ services:
     container_name: quackback-app
     restart: unless-stopped
     init: true
-    # Carries BASE_URL, SECRET_KEY, email settings, S3_BUCKET/S3_REGION, etc.
     env_file: .env
-    # Internal wiring is fixed here (derived from the secrets in .env) so a
-    # self-hoster can't point these at the wrong host — these override env_file.
     environment:
       DATABASE_URL: postgresql://${POSTGRES_USER:?set POSTGRES_USER in .env}:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}@postgres:5432/${POSTGRES_DB:-quackback}
       REDIS_URL: redis://dragonfly:6379
@@ -44,14 +17,10 @@ services:
       S3_ACCESS_KEY_ID: ${MINIO_ROOT_USER:?set MINIO_ROOT_USER in .env}
       S3_SECRET_ACCESS_KEY: ${MINIO_ROOT_PASSWORD:?set MINIO_ROOT_PASSWORD in .env}
       S3_FORCE_PATH_STYLE: 'true'
-      # MinIO has no public port, so the browser can't reach it directly:
-      # serve uploads through the app's /api/storage proxy.
       S3_PROXY: 'true'
-    ports:
-      - '${APP_PORT:-3000}:3000'
     networks:
-    - default
-    - easypanel
+      - default
+      - easypanel
     depends_on:
       postgres:
         condition: service_healthy
@@ -60,8 +29,6 @@ services:
       minio-init:
         condition: service_completed_successfully
     healthcheck:
-      # Use Bun (always in the image) so we don't depend on curl/wget. The
-      # container listens on 3000 regardless of the published APP_PORT.
       test:
         [
           'CMD',
@@ -80,15 +47,18 @@ services:
       dockerfile: Dockerfile
     container_name: quackback-db
     restart: unless-stopped
+    cap_add:
+      - CHOWN
+      - DAC_OVERRIDE
+      - FOWNER
     environment:
       POSTGRES_USER: ${POSTGRES_USER:?set POSTGRES_USER in .env}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
       POSTGRES_DB: ${POSTGRES_DB:-quackback}
-    # No host port — Postgres is reachable only on the internal network.
+      PGDATA: /var/lib/postgresql/data/pgdata
     volumes:
-      - postgres_data:/var/lib/postgresql
+      - postgres_data:/var/lib/postgresql/data
       - ./docker/postgres/init-pgcron.sql:/docker-entrypoint-initdb.d/init-pgcron.sql
-    # pg_cron is required for scheduled analytics/materialized-view refreshes.
     command: postgres -c shared_preload_libraries=pg_cron -c cron.database_name=${POSTGRES_DB:-quackback} -c max_connections=200
     healthcheck:
       test: ['CMD-SHELL', 'pg_isready -U "$${POSTGRES_USER}" -d "$${POSTGRES_DB}"']
@@ -100,9 +70,7 @@ services:
     image: docker.dragonflydb.io/dragonflydb/dragonfly:v1.27.1
     container_name: quackback-dragonfly
     restart: unless-stopped
-    # BullMQ requires cluster_mode=emulated + lock_on_hashtags for Lua script compatibility.
     command: dragonfly --cluster_mode=emulated --lock_on_hashtags
-    # No host port — reachable only on the internal network.
     volumes:
       - dragonfly_data:/data
     ulimits:
@@ -120,7 +88,6 @@ services:
     environment:
       MINIO_ROOT_USER: ${MINIO_ROOT_USER:?set MINIO_ROOT_USER in .env}
       MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:?set MINIO_ROOT_PASSWORD in .env}
-    # No host port — object storage is internal; uploads are served via the app.
     command: server /data
     volumes:
       - minio_data:/data
@@ -130,9 +97,6 @@ services:
       timeout: 5s
       retries: 5
 
-  # Creates the upload bucket on first start. Unlike the dev stack it does NOT
-  # set a public download policy — the bucket stays private and is served
-  # through the app's /api/storage proxy (S3_PROXY=true above).
   minio-init:
     image: minio/mc:${MC_IMAGE_TAG:-latest}
     container_name: quackback-minio-init
@@ -150,10 +114,11 @@ services:
       "
     restart: 'no'
 
+networks:
+  easypanel:
+    external: true
+
 volumes:
   postgres_data:
-networks:
-    easypanel:
-      external: true
   minio_data:
   dragonfly_data:
